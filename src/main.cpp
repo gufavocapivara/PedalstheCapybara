@@ -697,7 +697,7 @@ static void DrawHeader(const ImVec2& pos, const ImVec2& size, HeaderRefs& r) {
         ImVec2 bsize(S(112), S(30));
         x -= bsize.x;
         ImGui::SetCursorScreenPos(ImVec2(x, cy - bsize.y * 0.5f));
-        if (ImGui::Button("Donate", bsize)) openUrl("https://buymeacoffee.com/capybaracubiluda");
+        if (ImGui::Button("Donate", bsize)) openUrl("https://github.com/sponsors/gufavocapivara?frequency=one-time&sponsor=gufavocapivara");
         x -= S(8);
     }
     // editor button
