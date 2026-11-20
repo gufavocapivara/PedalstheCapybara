@@ -1,0 +1,3 @@
+NAME=JOYO American Sound JF-14
+DESCRIPTION=DSP amp/cabinet model with Level, Low, Mid, High, Voice, and Drive controls.
+SCRIPT=pedal_american.lua
