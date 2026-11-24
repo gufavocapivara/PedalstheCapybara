@@ -3,9 +3,15 @@
 [![build](https://github.com/gufavocapivara/PedalstheCapybara/actions/workflows/build.yml/badge.svg)](https://github.com/gufavocapivara/PedalstheCapybara/actions/workflows/build.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+Português | [English](README.en.md)
+
 Pedals the Capybara é um pedalboard/amp sim em tempo real para guitarra, escrito em C++ com Dear ImGui + GLFW/OpenGL, miniaudio e Lua.
 
+**[Baixar build mais recente para Windows (ZIP)](https://github.com/gufavocapivara/PedalstheCapybara/releases/latest/download/PedalTheCapybara-windows-x64.zip)** — descompacte e rode `PedalTheCapybara.exe`. O zip traz os packs iniciais; a pasta `Plugins/` é criada pelo app na primeira execução. (O instalador antigo continua na [release v1.0-Beta](https://github.com/gufavocapivara/PedalstheCapybara/releases/tag/v1.0-Beta).)
+
 ![Pedals the Capybara](docs/screenshot.png)
+
+**Começo rápido:** arraste um pedal da Library para a cadeia (ou duplo clique). Amps são cards normais na mesma cadeia. Knob: arraste para cima/baixo, roda do mouse, `Shift` para ajuste fino, duplo clique restaura o padrão. Plugins entram por **Plugins > Import .pctp / .pp...** ou arrastando o arquivo para a janela.
 
 <!-- Para uma demonstração animada: grave ~10 s arrastando um pedal para a cadeia,
      salve como docs/demo.gif e descomente a linha abaixo:

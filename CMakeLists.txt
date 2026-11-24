@@ -168,16 +168,10 @@ if(WIN32)
   target_link_libraries(PedalTheCapybara PRIVATE comdlg32 ole32 uuid shell32)
 endif()
 
-# Copia plugins, packs e assets para a pasta do executável em builds limpas.
+# Copia apenas conteúdo (Packs/Assets) para a pasta do executável.
+# Plugins/ é dado de runtime: o app cria a pasta sozinho quando abre.
 add_custom_command(TARGET PedalTheCapybara POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:PedalTheCapybara>/Plugins"
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:PedalTheCapybara>/Packs")
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Plugins")
-  add_custom_command(TARGET PedalTheCapybara POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${CMAKE_CURRENT_SOURCE_DIR}/Plugins"
-      "$<TARGET_FILE_DIR:PedalTheCapybara>/Plugins")
-endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Packs")
   add_custom_command(TARGET PedalTheCapybara POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -212,12 +206,13 @@ if(MSVC)
   target_compile_options(smoke_packages PRIVATE /utf-8)
 endif()
 
-add_test(NAME packages
-  COMMAND smoke_packages
-    "${CMAKE_CURRENT_SOURCE_DIR}/Demos/GoldenEcho.pctp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Demos/boss_ds1.pctp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Packs/CapybaraStarter.pp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Packs/BossInspired.pp")
+# Testa TODOS os packs/demos incluidos; novos arquivos entram automaticamente.
+file(GLOB PACKAGE_TEST_FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/Demos/*.pctp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Demos/*.pp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Packs/*.pctp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Packs/*.pp")
+add_test(NAME packages COMMAND smoke_packages ${PACKAGE_TEST_FILES})
 
 # ---- zip distribuivel -------------------------------------------------------
 # `cmake --build build --config Release --target package`
@@ -225,11 +220,13 @@ set(PACKAGE_DIR "${CMAKE_BINARY_DIR}/package")
 set(PACKAGE_ZIP "${CMAKE_BINARY_DIR}/PedalTheCapybara-windows-x64.zip")
 
 add_custom_target(package
+  # Limpa para nao reaproveitar Packs/Plugins de builds anteriores.
+  COMMAND ${CMAKE_COMMAND} -E remove_directory "${PACKAGE_DIR}"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_DIR}"
   COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:PedalTheCapybara>" "${PACKAGE_DIR}/"
   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${PACKAGE_DIR}/"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/README.en.md" "${PACKAGE_DIR}/"
   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" "${PACKAGE_DIR}/"
-  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Plugins" "${PACKAGE_DIR}/Plugins"
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Packs" "${PACKAGE_DIR}/Packs"
   COMMAND ${CMAKE_COMMAND} -E chdir "${PACKAGE_DIR}" "${CMAKE_COMMAND}" -E tar cf "${PACKAGE_ZIP}" --format=zip -- .
   DEPENDS PedalTheCapybara
