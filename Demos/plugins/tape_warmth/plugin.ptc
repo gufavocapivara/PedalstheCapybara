@@ -1,0 +1,6 @@
+NAME=Tape Warmth
+DESCRIPTION=Amp-style warmth plugin. Amps live in the same chain as pedals.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=tape_warmth.lua
+ICON=assets/face.png

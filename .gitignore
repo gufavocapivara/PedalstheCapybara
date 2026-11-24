@@ -12,11 +12,18 @@ Makefile
 third_party/*
 !third_party/miniaudio.h
 !third_party/LICENSE
+!third_party/miniz/
+!third_party/miniz/**
+!third_party/portable-file-dialogs.h
 
-# Keep only the bundled sample plugin; ignore local plugins by default
+# Keep bundled/demo plugins; ignore local plugins by default
 Plugins/*
 !Plugins/pedal_american.lua
 !Plugins/pedal_american.ptc
+!Plugins/capybara_drive.lua
+!Plugins/capybara_drive.ptc
+!Plugins/capybara_drive_assets/
+!Plugins/capybara_drive_assets/**
 *.user
 *.suo
 *.userosscache

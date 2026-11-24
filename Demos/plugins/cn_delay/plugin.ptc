@@ -1,0 +1,6 @@
+NAME=CN Lead Delay (Inspired)
+DESCRIPTION=Delay curto para solo. Controles: Time, Feedback, Mix, Tone. DSP original.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=cn_delay.lua
+ICON=assets/face.png

@@ -1,0 +1,6 @@
+NAME=BOSS MD-2 Mega Distortion (Inspired)
+DESCRIPTION=Inspired by BOSS MD-2 controls: Level, Tone/Bottom, Dist, Gain Boost. Original DSP model, not schematic-accurate or affiliated with BOSS/Roland.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=boss_md2.lua
+ICON=assets/face.png

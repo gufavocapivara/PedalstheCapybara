@@ -30,6 +30,7 @@ namespace gp {
             treble = add("treble", 0.0f, 1.0f, 0.5f);
             master = add("master", 0.0f, 1.0f, 0.6f);
             category = "Amps";
+            isAmp = true;
             color[0] = 0.15f; color[1] = 0.15f; color[2] = 0.15f;
             hasColor = true;
         }
@@ -113,6 +114,7 @@ namespace gp {
             sag = add("sag", 0.0f, 1.0f, 0.25f);
             gate = add("gate", -80.0f, -30.0f, -55.0f);
             category = "Amps";
+            isAmp = true;
             color[0] = 0.20f; color[1] = 0.19f; color[2] = 0.18f;
             hasColor = true;
         }
@@ -206,6 +208,8 @@ namespace gp {
 
     struct AmpAsset {
         std::string name;
+        std::string source;   // "Native", nome do pack ou "Plugin"
+        std::string file;     // .ptc/.pctp/.pp de origem
         std::function<std::unique_ptr<Pedal>()> make;
         bool fromPlugin = false;
     };
@@ -216,8 +220,10 @@ namespace gp {
             add("Marshall Plexi 1959", [] { return std::make_unique<Marshall>(); });
             add("Marshall JCM800 2203", [] { return std::make_unique<JCM8002203>(); });
         }
-        void add(std::string name, std::function<std::unique_ptr<Pedal>()> f, bool fromPlugin = false) {
-            amps_.push_back({ std::move(name), std::move(f), fromPlugin });
+        void add(std::string name, std::function<std::unique_ptr<Pedal>()> f,
+                 bool fromPlugin = false, std::string source = "Native", std::string file = {}) {
+            amps_.push_back({ std::move(name), std::move(source), std::move(file),
+                              std::move(f), fromPlugin });
         }
         void clearPlugins() {
             amps_.erase(std::remove_if(amps_.begin(), amps_.end(),
@@ -227,7 +233,10 @@ namespace gp {
         std::unique_ptr<Pedal> create(int i) const {
             if (i < 0 || i >= (int)amps_.size()) return nullptr;
             auto p = amps_[i].make();
-            if (p) p->category = "Amps";
+            if (p) {
+                p->category = "Amps";
+                p->isAmp = true;
+            }
             return p;
         }
     private:

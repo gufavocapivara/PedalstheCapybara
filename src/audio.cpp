@@ -32,7 +32,6 @@ namespace gp {
     void Engine::prepare(float sr) {
         rate = sr > 0.0f ? sr : 48000.0f;
         board.prepare(rate);
-        board.prepareAmp(rate);
         inputDC.highpass(rate, 40.0f);
         cpuLoad.store(0.0f);
     }

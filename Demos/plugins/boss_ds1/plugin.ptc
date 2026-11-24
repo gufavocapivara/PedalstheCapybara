@@ -1,0 +1,6 @@
+NAME=BOSS DS-1 Distortion (Inspired)
+DESCRIPTION=Inspired by BOSS DS-1 controls: Level, Tone, Dist. Original DSP model, not schematic-accurate or affiliated with BOSS/Roland.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=boss_ds1.lua
+ICON=assets/face.png

@@ -1,0 +1,6 @@
+NAME=CN Comp (Inspired)
+DESCRIPTION=Compressor inspirado para sustain limpo antes do drive. Controles: Sustain, Level, Attack, Blend. DSP original, não afiliado.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=cn_comp.lua
+ICON=assets/face.png

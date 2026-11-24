@@ -226,6 +226,10 @@ namespace gp {
         std::string category;  // preenchido pela AssetLibrary (cor/agrupamento na UI)
         float color[3] = { 0.6f, 0.6f, 0.65f };  // RGB 0..1 (definido por pedais Lua)
         bool hasColor = false;
+        // Um amp e apenas um pedal especial: fica na mesma cadeia, pode ser
+        // arrastado e so pode existir um por pedalboard (o Pedalboard::add
+        // substitui o anterior automaticamente).
+        bool isAmp = false;
         std::atomic<bool> enabled{ false };
         std::vector<std::unique_ptr<Param>> params;
 
@@ -527,34 +531,11 @@ namespace gp {
     // A ordem é publicada num único atomic<uint64_t> (15 slots x 4 bits, 0xF = fim),
     // então o thread de áudio sempre enxerga uma cadeia consistente, sem locks.
     // Pedais removidos só são destruídos ~1 s depois (gc), quando o áudio já largou eles.
-    // O amp é tratado como o último pedal da cadeia: fica "em baixo" na UI e sempre
-    // processa depois de todos os pedais, mas com a mesma liberdade dos outros.
+    // O amp é um pedal como qualquer outro: fica na mesma cadeia, pode ser
+    // reordenado/desligado e o Pedalboard garante que exista no maximo um.
     class Pedalboard {
     public:
         static constexpr int kSlots = 15;
-
-        // ------------------------------------------------------------- Amp slot
-        // O amp é criado/preparado na thread da UI e publicado por um atomic.
-        // O antigo só é destruído ~1 s depois: o callback de áudio pode ainda
-        // estar dentro dele quando a troca acontece. Sem isso, trocar de amp
-        // com o áudio ligado podia derrubar o app (use-after-free).
-        bool hasAmp() const { return amp_ != nullptr; }
-        Pedal* amp() const { return amp_.get(); }
-        void setAmp(std::unique_ptr<Pedal> p) {
-            if (p) p->prepare(sampleRate);
-            ampPub.store(p.get(), std::memory_order_release);
-            if (amp_) {
-                retired.push_back(std::move(amp_));
-                retiredAt.push_back(now() + 1.0);
-            }
-            amp_ = std::move(p);
-        }
-
-        // Chamado pelo prepare() da engine antes do áudio começar.
-        void prepareAmp(float sr) {
-            sampleRate = sr > 0 ? sr : 48000.0f;
-            if (amp_) amp_->prepare(sampleRate);
-        }
 
         void prepare(float sr) {
             sampleRate = sr > 0 ? sr : 48000.0f;
@@ -562,10 +543,21 @@ namespace gp {
         }
 
         // ---- thread da UI ----
+        // Adiciona um pedal. Se for um amp e ja existir um amp na cadeia, o
+        // antigo e removido e o novo ocupa o lugar dele (ou `pos`, se dado).
         int add(std::unique_ptr<Pedal> p, int pos = -1) {
+            if (!p) return -1;
+            if (p->isAmp) {
+                const int existing = ampIndex();
+                if (existing >= 0) {
+                    if (pos < 0) pos = existing;
+                    remove(existing);
+                    if (pos > existing) --pos;
+                }
+            }
             int id = -1;
             for (int i = 0; i < kSlots; ++i) if (!slots[i].used) { id = i; break; }
-            if (id < 0 || !p) return -1;
+            if (id < 0) return -1;
             p->prepare(sampleRate);
             slots[id].p = std::move(p);
             slots[id].used = true;
@@ -600,23 +592,39 @@ namespace gp {
             publish();
         }
         void clear() { while (orderSize > 0) remove(orderSize - 1); }
+
+        // Encerramento: o áudio já foi parado, então pode destruir tudo agora.
+        // (clear() + gc() esperaria 1 s e as texturas seriam liberadas depois do
+        // contexto OpenGL, causando crash no shutdown.)
+        void destroyAllNow() {
+            chain.store(0xFFFFFFFFFFFFFFFFull, std::memory_order_release);
+            orderSize = 0;
+            for (auto& s : slots) {
+                s.p.reset();
+                s.used = false;
+                s.dying = false;
+            }
+        }
+
         void gc() {
-            double t = now();
+            const double t = now();
             for (auto& s : slots)
                 if (s.dying && t >= s.freeAt) { s.p.reset(); s.used = false; s.dying = false; }
-            size_t i = 0;
-            while (i < retired.size()) {
-                if (t >= retiredAt[i]) {
-                    retired[i] = std::move(retired.back());
-                    retiredAt[i] = retiredAt.back();
-                    retired.pop_back();
-                    retiredAt.pop_back();
-                }
-                else ++i;
-            }
         }
         int size() const { return orderSize; }
         Pedal* at(int pos) { return (pos >= 0 && pos < orderSize) ? slots[order[pos]].p.get() : nullptr; }
+
+        int ampIndex() const {
+            for (int i = 0; i < orderSize; ++i) {
+                const Pedal* p = slots[order[i]].p.get();
+                if (p && p->isAmp) return i;
+            }
+            return -1;
+        }
+        Pedal* amp() {
+            const int i = ampIndex();
+            return i >= 0 ? at(i) : nullptr;
+        }
 
         // ---- thread de áudio ----
         void process(float* x, int n) {
@@ -628,18 +636,12 @@ namespace gp {
                     if (id == 0xF || id >= (unsigned)kSlots) break;
                     if (Pedal* p = slots[id].p.get()) p->run(x + off, cnt);
                 }
-                // O amp é sempre o último estágio, depois de todos os pedais.
-                if (Pedal* a = ampPub.load(std::memory_order_acquire)) a->run(x + off, cnt);
             }
         }
 
     private:
         struct Slot { std::unique_ptr<Pedal> p; bool used = false, dying = false; double freeAt = 0; };
         Slot slots[kSlots];
-        std::unique_ptr<Pedal> amp_;
-        std::atomic<Pedal*> ampPub{ nullptr };
-        std::vector<std::unique_ptr<Pedal>> retired;  // amps antigos aguardando o gc
-        std::vector<double> retiredAt;
         int order[kSlots] = {};  // ordem fixa: sem realocação nem iteradores no pedalboard
         int orderSize = 0;
         std::atomic<uint64_t> chain{ ~0ull };

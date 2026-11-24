@@ -1,8 +1,8 @@
 // Pedals the Capybara - interface (Dear ImGui + GLFW + OpenGL3)
 //
-// Layout: barra de menu -> cabecalho (logo, status, medidores, gain/master)
-//         -> painel de assets | cadeia de pedais + amp
-//         -> barra de status. O editor Lua abre em janela propria.
+// Layout: menu -> header (logo, status, meters, gain/master)
+//         -> library | signal chain (pedals + amp together) -> status bar.
+//         The Lua editor and the plugin manager open as floating windows.
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -10,21 +10,25 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
-
-#include "imgui.h"
-#include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
-#include <GLFW/glfw3.h>
-
-#include "stb_image.h"
 
 #if defined(_WIN32)
 #  include <windows.h>
 #  include <shellapi.h>
 #  pragma comment(lib, "shell32.lib")
 #endif
+
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#include <GLFW/glfw3.h>
+#include <GL/gl.h>
+
+#include "stb_image.h"
 
 #include "assets.h"
 #include "audio.h"
@@ -33,6 +37,7 @@
 #include "lua_pedal.h"
 #include "amps.h"
 #include "textures.h"
+#include "portable-file-dialogs.h"
 
 using namespace gp;
 namespace fs = std::filesystem;
@@ -65,6 +70,10 @@ namespace pal {
 static ImU32 WithAlpha(ImU32 c, int a) { return (c & 0x00FFFFFFu) | ((ImU32)a << 24); }
 
 static void TextAt(ImDrawList* dl, ImFont* f, ImVec2 pos, ImU32 col, const char* txt) {
+    dl->AddText(f, f->FontSize, pos, col, txt);
+}
+static void TextAtShadow(ImDrawList* dl, ImFont* f, ImVec2 pos, ImU32 col, const char* txt) {
+    dl->AddText(f, f->FontSize, ImVec2(pos.x + S(1), pos.y + S(1)), IM_COL32(0, 0, 0, 170), txt);
     dl->AddText(f, f->FontSize, pos, col, txt);
 }
 static void TextCentered(ImDrawList* dl, ImFont* f, ImVec2 ctr, ImU32 col, const char* txt) {
@@ -153,7 +162,7 @@ static void setupStyle() {
     c[ImGuiCol_CheckMark] = ImVec4(0.914f, 0.631f, 0.231f, 1);
     c[ImGuiCol_SliderGrab] = ImVec4(0.914f, 0.631f, 0.231f, 1);
     c[ImGuiCol_SliderGrabActive] = ImVec4(0.969f, 0.702f, 0.337f, 1);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.055f, 0.065f, 0.080f, 0.60f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.055f, 0.065f, 0.080f, 0.20f);
     c[ImGuiCol_ScrollbarGrab] = ImVec4(0.235f, 0.268f, 0.318f, 1);
     c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.310f, 0.353f, 0.416f, 1);
     c[ImGuiCol_PlotHistogram] = ImVec4(0.275f, 0.784f, 0.470f, 1);
@@ -171,7 +180,7 @@ static ImFont* tryFont(const char* path, float size) {
 
 static void loadFonts(float scale) {
     const char* regular[] = { "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\tahoma.ttf", "C:\\Windows\\Fonts\\arial.ttf" };
-    const char* semi[] = { "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\segoeui.ttf" };
+    const char* semi[] = { "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf" };
     const char* bold[] = { "C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeui.ttf" };
 
     for (const char* p : regular) if (!fontReg && (fontReg = tryFont(p, 16.0f * scale))) break;
@@ -221,7 +230,53 @@ static void DrawKnobVisual(ImDrawList* dl, ImVec2 ctr, float r, float t, ImU32 a
     dl->AddLine(p0, p1, hovered ? pal::text : IM_COL32(215, 220, 228, 255), S(2.5f));
 }
 
-static void Knob(Param& p, ImU32 accent, float dia) {
+// ------------------------------------------------------------------- texturas
+static void DrawTexCover(ImDrawList* dl, TextureId id, ImVec2 a, ImVec2 b,
+                         float rounding, ImU32 tint) {
+    if (!id) return;
+    const auto inf = globalTextureCache().info(id);
+    if (!inf.valid()) return;
+    ImVec2 uv0(0, 0), uv1(1, 1);
+    const float dstAspect = (b.x - a.x) / std::max(1.0f, b.y - a.y);
+    const float srcAspect = (float)inf.w / std::max(1, inf.h);
+    if (srcAspect > dstAspect) {
+        const float f = dstAspect / srcAspect;
+        uv0.x = (1.0f - f) * 0.5f;
+        uv1.x = (1.0f + f) * 0.5f;
+    } else {
+        const float f = srcAspect / dstAspect;
+        uv0.y = (1.0f - f) * 0.5f;
+        uv1.y = (1.0f + f) * 0.5f;
+    }
+    dl->AddImageRounded((ImTextureID)(intptr_t)inf.gl_id, a, b, uv0, uv1, tint, rounding);
+}
+
+static void DrawTexFit(ImDrawList* dl, TextureId id, ImVec2 a, ImVec2 b, ImU32 tint) {
+    if (!id) return;
+    const auto inf = globalTextureCache().info(id);
+    if (!inf.valid()) return;
+    const float sc = std::min((b.x - a.x) / std::max(1, inf.w), (b.y - a.y) / std::max(1, inf.h));
+    const float w = inf.w * sc, h = inf.h * sc;
+    const ImVec2 p(a.x + ((b.x - a.x) - w) * 0.5f, a.y + ((b.y - a.y) - h) * 0.5f);
+    dl->AddImage((ImTextureID)(intptr_t)inf.gl_id, p, ImVec2(p.x + w, p.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
+}
+
+static bool DrawKnobTexture(ImDrawList* dl, TextureId id, ImVec2 ctr, float r, float t, ImU32 tint) {
+    if (!id) return false;
+    const auto inf = globalTextureCache().info(id);
+    if (!inf.valid()) return false;
+    const float ang = (std::clamp(t, 0.0f, 1.0f) - 0.5f) * gp::kPi * 1.5f;
+    const float c = std::cos(ang), s = std::sin(ang);
+    auto rot = [&](float x, float y) {
+        return ImVec2(ctr.x + x * c - y * s, ctr.y + x * s + y * c);
+    };
+    const ImVec2 p1 = rot(-r, -r), p2 = rot(r, -r), p3 = rot(r, r), p4 = rot(-r, r);
+    dl->AddImageQuad((ImTextureID)(intptr_t)inf.gl_id, p1, p2, p3, p4,
+                     ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1), tint);
+    return true;
+}
+
+static void Knob(Param& p, ImU32 accent, float dia, const TextureSet* tex = nullptr) {
     const float width = dia + S(18);
     const float labelH = S(18);
     ImGui::PushID(&p);
@@ -230,17 +285,16 @@ static void Knob(Param& p, ImU32 accent, float dia) {
     ImGui::InvisibleButton("##k", ImVec2(width, dia + labelH));
     ImGuiIO& io = ImGui::GetIO();
     float v = p.get();
-    bool changed = false;
     if (ImGui::IsItemActive() && io.MouseDelta.y != 0.0f) {
         float speed = io.KeyShift ? 0.0008f : 0.006f;
         p.set(v - io.MouseDelta.y * (p.maxV - p.minV) * speed);
-        v = p.get(); changed = true;
+        v = p.get();
     }
     if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f) {
         p.set(v + io.MouseWheel * (p.maxV - p.minV) * 0.02f);
-        v = p.get(); changed = true;
+        v = p.get();
     }
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { p.set(p.defV); v = p.get(); changed = true; }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { p.set(p.defV); v = p.get(); }
     const bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
     if (hovered) {
         char buf[64]; FormatParam(p, v, buf, sizeof(buf));
@@ -251,14 +305,20 @@ static void Knob(Param& p, ImU32 accent, float dia) {
     ImVec2 ctr(pos.x + width * 0.5f, pos.y + dia * 0.5f);
     float r = dia * 0.5f - S(1);
     float t = (p.maxV > p.minV) ? (v - p.minV) / (p.maxV - p.minV) : 0.0f;
-    DrawKnobVisual(dl, ctr, r, t, accent, hovered, ImGui::IsItemActive());
+    bool drawn = false;
+    if (tex && tex->knobShadow)
+        DrawKnobTexture(dl, tex->knobShadow, ImVec2(ctr.x, ctr.y + S(2)), r * 1.08f, t, IM_COL32(255, 255, 255, 120));
+    if (tex && tex->knob) {
+        drawn = DrawKnobTexture(dl, tex->knob, ctr, r, t,
+                                hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(240, 240, 240, 255));
+    }
+    if (!drawn) DrawKnobVisual(dl, ctr, r, t, accent, hovered, ImGui::IsItemActive());
 
     char val[64];
     FormatParam(p, v, val, sizeof(val));
     const char* label = hovered || ImGui::IsItemActive() ? val : p.name.c_str();
     ImU32 lcol = (hovered || ImGui::IsItemActive()) ? accent : pal::dim;
     TextCentered(dl, fontSmall, ImVec2(ctr.x, pos.y + dia + S(8)), lcol, label);
-    (void)changed;
     ImGui::EndGroup();
     ImGui::PopID();
 }
@@ -311,9 +371,9 @@ static void ButtonSpin(Param& p, ImU32 accent, float width) {
     ImGui::PopID();
 }
 
-static void DrawParam(Param& p, ImU32 accent, int widget, float knobDia) {
+static void DrawParam(Param& p, ImU32 accent, int widget, float knobDia, const TextureSet* tex = nullptr) {
     if (widget == gp::kButtonSpin || !p.labels.empty()) ButtonSpin(p, accent, knobDia + S(18));
-    else Knob(p, accent, knobDia);
+    else Knob(p, accent, knobDia, tex);
 }
 
 // Medidor horizontal com pico.
@@ -331,7 +391,6 @@ static void MeterBar(const char* label, float lvl, float w, float h) {
         ImU32 col = fill > 0.95f ? pal::red : (fill > 0.80f ? pal::yellow : pal::green);
         dl->AddRectFilled(ImVec2(p.x, barY), ImVec2(p.x + w * fill, barY + barH), col, S(3));
     }
-    // marcações
     for (int i = 1; i < 8; ++i) {
         float x = p.x + w * (i / 8.0f);
         dl->AddLine(ImVec2(x, barY), ImVec2(x, barY + barH), IM_COL32(0, 0, 0, 90), S(1));
@@ -373,9 +432,8 @@ static const float kKnobDia = 38.0f;
 struct BoardOps {
     int remove = -1;
     int moveFrom = -1, moveTo = -1;
-    int addAsset = -1, addAt = -1;
+    int addAsset = -1, addAmp = -1, addAt = -1;
 };
-struct AmpOps { int select = -2; };
 
 static int ParamColumns(const Pedal& p, int maxCols) {
     int n = (int)p.params.size();
@@ -386,26 +444,48 @@ static int ParamRows(const Pedal& p, int cols) {
     int n = (int)p.params.size();
     return (n + cols - 1) / std::max(1, cols);
 }
-static float CardHFor(const Pedal& p, int cols, float base) {
-    int rows = ParamRows(p, cols);
-    return std::clamp(base + rows * S(64), S(170), S(460));
+
+struct CardSize { float w = 0, h = 0; };
+
+static CardSize SizeFor(const Pedal& p) {
+    const auto* lp = dynamic_cast<const LuaPedal*>(&p);
+    const float pad = S(10);
+    float w = (lp && lp->uiW > 0.0f) ? lp->uiW : (p.isAmp ? S(300) : S(196));
+    w = std::clamp(w, S(180), S(620));
+    const int cols = std::max(1, std::min(5, (int)((w - pad * 2.0f) / (kKnobDia + S(18)))));
+    const int rows = ParamRows(p, cols);
+    float h = S(104) + rows * S(64) + S(48);
+    if (lp && lp->uiH > 0.0f) h = std::max(h, lp->uiH);
+    h = std::clamp(h, S(170), S(700));
+    return { w, h };
 }
 
-static void DrawPowerButton(const char* id, bool on, ImVec2 size, ImU32 accent) {
+static bool PowerButton(const char* id, bool on, ImVec2 size, ImU32 accent, TextureId footTex) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, size);
-    bool hovered = ImGui::IsItemHovered();
+    const bool clicked = ImGui::IsItemClicked();
+    const bool hovered = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImU32 bg = on ? (hovered ? IM_COL32(52, 170, 96, 255) : IM_COL32(40, 140, 80, 255))
                   : (hovered ? pal::panel2 : pal::card);
     dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), bg, S(7));
-    dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), on ? IM_COL32(90, 220, 140, 255) : pal::border, S(7), 0, S(1));
-    ImVec2 led(p.x + S(14), p.y + size.y * 0.5f);
-    dl->AddCircleFilled(led, S(4), on ? IM_COL32(180, 255, 200, 255) : IM_COL32(90, 96, 108, 255), 16);
-    if (on) dl->AddCircleFilled(led, S(7), IM_COL32(120, 255, 170, 40), 16);
-    TextCentered(dl, fontSemi, ImVec2(p.x + size.x * 0.5f, p.y + size.y * 0.5f),
-                 on ? IM_COL32(240, 255, 245, 255) : pal::dim, on ? "LIGADO" : "BYPASS");
+    dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y),
+                on ? IM_COL32(90, 220, 140, 255) : pal::border, S(7), 0, S(1));
+    if (footTex) {
+        DrawTexFit(dl, footTex, ImVec2(p.x + S(3), p.y + S(3)),
+                   ImVec2(p.x + size.y - S(2), p.y + size.y - S(3)),
+                   on ? IM_COL32(255, 255, 255, 255) : IM_COL32(190, 190, 190, 255));
+        TextCentered(dl, fontSemi, ImVec2(p.x + size.x * 0.58f, p.y + size.y * 0.5f),
+                     on ? IM_COL32(240, 255, 245, 255) : pal::dim, on ? "LIGADO" : "BYPASS");
+    } else {
+        ImVec2 led(p.x + S(14), p.y + size.y * 0.5f);
+        dl->AddCircleFilled(led, S(4), on ? IM_COL32(180, 255, 200, 255) : IM_COL32(90, 96, 108, 255), 16);
+        if (on) dl->AddCircleFilled(led, S(7), IM_COL32(120, 255, 170, 40), 16);
+        TextCentered(dl, fontSemi, ImVec2(p.x + size.x * 0.5f, p.y + size.y * 0.5f),
+                     on ? IM_COL32(240, 255, 245, 255) : pal::dim, on ? "LIGADO" : "BYPASS");
+    }
     (void)accent;
+    return clicked;
 }
 
 static void DropSlot(int pos, float w, float cardH, BoardOps& ops, bool last) {
@@ -438,26 +518,39 @@ static void DropSlot(int pos, float w, float cardH, BoardOps& ops, bool last) {
         if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) {
             ops.addAsset = *(const int*)pl->Data; ops.addAt = pos;
         }
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AMP")) {
+            ops.addAmp = *(const int*)pl->Data; ops.addAt = pos;
+        }
         ImGui::EndDragDropTarget();
     }
     ImGui::PopID();
 }
 
 static void PedalCard(Pedal& p, int pos, BoardOps& ops) {
-    const int cols = 3;
-    const float W = S(196);
-    const float H = CardHFor(p, cols, S(96));
+    const CardSize sz = SizeFor(p);
+    const float W = sz.w, H = sz.h;
     const ImU32 col = AccentFor(p);
     const bool on = p.enabled.load();
     const float pad = S(10);
+    const auto* lp = dynamic_cast<const LuaPedal*>(&p);
+    const TextureSet* tex = lp ? &lp->tex : nullptr;
+    const float headerH = S(28);
+    const float footerH = S(38);
 
     ImGui::PushID(&p);
     ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImVec2 p1(p0.x + W, p0.y + H);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(p0.x, p0.y + S(4)), ImVec2(p0.x + W, p0.y + H + S(4)), pal::shadow, S(12));
-    dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + H), pal::card, S(12));
-    dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + S(5)), col, S(12), ImDrawFlags_RoundCornersTop);
-    dl->AddRect(p0, ImVec2(p0.x + W, p0.y + H), on ? WithAlpha(col, 220) : pal::border, S(12), 0, S(1.5f));
+    dl->AddRectFilled(ImVec2(p0.x, p0.y + S(4)), ImVec2(p1.x, p1.y + S(4)), pal::shadow, S(12));
+    dl->AddRectFilled(p0, p1, pal::card, S(12));
+
+    const bool hasBase = tex && tex->base;
+    if (hasBase) {
+        DrawTexCover(dl, tex->base, p0, p1, S(12), IM_COL32(255, 255, 255, 255));
+        dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 55), S(12));
+    }
+    dl->AddRectFilled(p0, ImVec2(p1.x, p0.y + S(5)), col, S(12), ImDrawFlags_RoundCornersTop);
+    dl->AddRect(p0, p1, on ? WithAlpha(col, 220) : pal::border, S(12), 0, S(1.5f));
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, S(8)));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
@@ -467,134 +560,88 @@ static void PedalCard(Pedal& p, int pos, BoardOps& ops) {
 
     // ---- cabecalho (arrastar) ----
     ImVec2 hp = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##drag", ImVec2(W - pad * 2 - S(56), S(24)));
+    ImGui::InvisibleButton("##drag", ImVec2(W - pad * 2 - S(58), headerH));
     if (ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload("PEDAL", &pos, sizeof(int));
         ImGui::Text("%s", p.name.c_str());
         ImGui::EndDragDropSource();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drag to reorder");
-    TextAt(cdl, fontSemi, ImVec2(hp.x, hp.y + S(3)), on ? pal::text : pal::dim, p.name.c_str());
 
-    // LED
-    ImVec2 led(hp.x + (W - pad * 2) - S(34), hp.y + S(12));
-    cdl->AddCircleFilled(led, S(5), on ? pal::green : IM_COL32(74, 80, 92, 255), 18);
-    if (on) cdl->AddCircleFilled(led, S(9), IM_COL32(90, 230, 140, 45), 18);
+    float nameX = hp.x;
+    if (p.isAmp) {
+        ImVec2 bp(hp.x, hp.y + S(4));
+        cdl->AddRectFilled(bp, ImVec2(bp.x + S(38), bp.y + S(17)), WithAlpha(col, 70), S(4));
+        cdl->AddRect(bp, ImVec2(bp.x + S(38), bp.y + S(17)), WithAlpha(col, 220), S(4), 0, S(1));
+        TextCentered(cdl, fontSmall, ImVec2(bp.x + S(19), bp.y + S(8.5f)), col, "AMP");
+        nameX += S(46);
+    }
+    if (tex && tex->label) {
+        DrawTexFit(cdl, tex->label, ImVec2(nameX, hp.y + S(1)),
+                   ImVec2(hp.x + W - pad * 2 - S(58), hp.y + headerH - S(1)),
+                   on ? IM_COL32(255, 255, 255, 255) : IM_COL32(180, 180, 180, 220));
+    } else {
+        TextAtShadow(cdl, fontSemi, ImVec2(nameX, hp.y + S(4)), on ? pal::text : pal::dim, p.name.c_str());
+    }
 
-    ImGui::SameLine(0, S(6));
-    ImVec2 xp = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##x", ImVec2(S(22), S(22)));
-    bool xh = ImGui::IsItemHovered();
-    if (xh) cdl->AddCircleFilled(ImVec2(xp.x + S(11), xp.y + S(11)), S(10), IM_COL32(120, 50, 50, 160), 16);
-    TextCentered(cdl, fontSemi, ImVec2(xp.x + S(11), xp.y + S(11)), xh ? pal::red : pal::dim, "x");
-    if (ImGui::IsItemClicked()) ops.remove = pos;
+    // Botão fechar no canto direito; LED à esquerda dele.
+    const float closeSz = S(18);
+    const float rightEdge = p0.x + W - pad;
+    const float headerTop = p0.y + S(8);
+    const ImVec2 xp(rightEdge - closeSz, headerTop + (headerH - closeSz) * 0.5f);
+    const ImVec2 savedCursor = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(xp);
+    ImGui::InvisibleButton("##x", ImVec2(closeSz, closeSz));
+    const bool xh = ImGui::IsItemHovered();
+    const bool xClicked = ImGui::IsItemClicked();
+    ImGui::SetCursorScreenPos(savedCursor);
+
+    const ImVec2 xCtr(xp.x + closeSz * 0.5f, xp.y + closeSz * 0.5f);
+    if (xh) cdl->AddCircleFilled(xCtr, closeSz * 0.58f, IM_COL32(120, 50, 50, 160), 16);
+    const float xr = S(3.8f);
+    const ImU32 xCol = xh ? pal::red : pal::dim;
+    cdl->AddLine(ImVec2(xCtr.x - xr, xCtr.y - xr), ImVec2(xCtr.x + xr, xCtr.y + xr), xCol, S(1.7f));
+    cdl->AddLine(ImVec2(xCtr.x - xr, xCtr.y + xr), ImVec2(xCtr.x + xr, xCtr.y - xr), xCol, S(1.7f));
+    if (xClicked) ops.remove = pos;
+
+    const ImVec2 ledCtr(xp.x - S(14), xCtr.y);
+    if (tex && tex->led) {
+        DrawTexFit(cdl, tex->led, ImVec2(ledCtr.x - S(9), ledCtr.y - S(9)),
+                   ImVec2(ledCtr.x + S(9), ledCtr.y + S(9)),
+                   on ? IM_COL32(255, 255, 255, 255) : IM_COL32(95, 100, 110, 255));
+    } else {
+        cdl->AddCircleFilled(ledCtr, S(5), on ? pal::green : IM_COL32(74, 80, 92, 255), 18);
+        if (on) cdl->AddCircleFilled(ledCtr, S(9), IM_COL32(90, 230, 140, 45), 18);
+    }
 
     // ---- knobs ----
-    ImGui::Dummy(ImVec2(0, S(4)));
+    const float bodyH = std::max(S(20), H - headerH - footerH - S(20));
+    ImGui::SetCursorPosY(S(8) + headerH);
+    ImGui::BeginChild("##body", ImVec2(0, bodyH), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    const int cols = std::max(1, std::min(5, (int)((W - pad * 2.0f) / (kKnobDia + S(18)))));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(2), S(6)));
     int i = 0;
     for (auto& prm : p.params) {
         if (i % cols != 0) ImGui::SameLine(0, S(2));
-        LuaPedal* lp = dynamic_cast<LuaPedal*>(&p);
         int kind = (lp && i < (int)lp->widgets.size()) ? lp->widgets[i] : gp::kSlider;
-        DrawParam(*prm, col, kind, kKnobDia);
+        DrawParam(*prm, col, kind, kKnobDia, tex);
         ++i;
     }
     ImGui::PopStyleVar();
+    ImGui::EndChild();
 
     // ---- rodape ----
-    ImGui::SetCursorPosY(H - S(46));
-    DrawPowerButton("##power", on, ImVec2(W - pad * 2, S(34)), col);
-    if (ImGui::IsItemClicked()) p.enabled = !on;
+    ImGui::SetCursorPosY(H - footerH);
+    if (PowerButton("##power", on, ImVec2(W - pad * 2, S(32)), col, tex ? tex->footswitch : 0))
+        p.enabled = !on;
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
-    ImGui::PopID();
-}
 
-static ImVec2 AmpCardSize(const Pedal& p) {
-    const auto* lp = dynamic_cast<const LuaPedal*>(&p);
-    const bool custom = lp && lp->uiW > 0.0f && lp->uiH > 0.0f;
-    const float w = std::max(custom ? lp->uiW : S(420), S(300));
-    const int cols = std::max(1, (int)((w - S(30)) / S(64)));
-    const int rows = ParamRows(p, cols);
-    const float needH = S(100) + rows * S(64);
-    float h = custom ? lp->uiH : std::max(needH, S(190));
-    if (!custom) h = std::min(h, S(560));
-    return ImVec2(w, std::max(h, S(180)));
-}
-
-static void AmpCard(Pedal& p, const AmpLibrary& amps, AmpOps& ops) {
-    const ImVec2 sz = AmpCardSize(p);
-    const ImU32 col = AccentFor(p);
-    const bool on = p.enabled.load();
-    const float pad = S(12);
-    LuaPedal* lp = dynamic_cast<LuaPedal*>(&p);
-
-    ImGui::PushID(&p);
-    ImVec2 p0 = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(p0.x, p0.y + S(4)), ImVec2(p0.x + sz.x, p0.y + sz.y + S(4)), pal::shadow, S(12));
-    dl->AddRectFilled(p0, ImVec2(p0.x + sz.x, p0.y + sz.y), IM_COL32(24, 27, 33, 255), S(12));
-    dl->AddRectFilled(p0, ImVec2(p0.x + sz.x, p0.y + S(5)), col, S(12), ImDrawFlags_RoundCornersTop);
-    dl->AddRect(p0, ImVec2(p0.x + sz.x, p0.y + sz.y), on ? WithAlpha(col, 220) : pal::border, S(12), 0, S(1.5f));
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, S(8)));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::SetCursorScreenPos(p0);
-    ImGui::BeginChild("##ampcard", sz, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
-    ImDrawList* cdl = ImGui::GetWindowDrawList();
-
-    ImVec2 hp = ImGui::GetCursorScreenPos();
-    // selo AMP
-    ImVec2 bp(hp.x, hp.y + S(3));
-    cdl->AddRectFilled(bp, ImVec2(bp.x + S(42), bp.y + S(18)), WithAlpha(col, 55), S(4));
-    cdl->AddRect(bp, ImVec2(bp.x + S(42), bp.y + S(18)), WithAlpha(col, 200), S(4), 0, S(1));
-    TextCentered(cdl, fontSmall, ImVec2(bp.x + S(21), bp.y + S(9)), col, "AMP");
-    TextAt(cdl, fontSemi, ImVec2(bp.x + S(52), hp.y + S(1)), on ? pal::text : pal::dim, p.name.c_str());
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Last in chain: guitar -> pedals -> AMP -> output");
-
-    // icone de alto-falante
-    {
-        ImVec2 c(ImGui::GetWindowPos().x + sz.x - S(34), hp.y + S(12));
-        cdl->AddCircle(c, S(9), WithAlpha(col, 170), 24, S(1.5f));
-        cdl->AddCircle(c, S(4), WithAlpha(col, 220), 16, S(1.5f));
-    }
-    ImGui::Dummy(ImVec2(0, S(22)));
-
-    // area dos controles
-    const float footerH = S(42);
-    float knobsH = std::max(S(40), sz.y - ImGui::GetCursorPosY() - footerH - S(6));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##ampknobs", ImVec2(0, knobsH), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
-    const int cols = std::max(1, (int)((sz.x - pad * 2 - S(6)) / (kKnobDia + S(18))));
-    int i = 0;
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(2), S(6)));
-    for (auto& prm : p.params) {
-        if (i % cols != 0) ImGui::SameLine(0, S(2));
-        int kind = (lp && i < (int)lp->widgets.size()) ? lp->widgets[i] : gp::kSlider;
-        DrawParam(*prm, col, kind, kKnobDia);
-        ++i;
-    }
-    ImGui::PopStyleVar();
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    ImGui::SetCursorPosY(sz.y - footerH);
-    DrawPowerButton("##ampower", on, ImVec2(S(110), S(32)), col);
-    if (ImGui::IsItemClicked()) p.enabled = !on;
-    ImGui::SameLine();
-    if (ImGui::Button("Change / Remove", ImVec2(S(150), S(32)))) ImGui::OpenPopup("##ampmenu");
-    if (ImGui::BeginPopup("##ampmenu")) {
-        for (int k = 0; k < (int)amps.all().size(); ++k)
-            if (ImGui::MenuItem(amps.all()[k].name.c_str())) ops.select = k;
-        ImGui::Separator();
-        if (ImGui::MenuItem("Remove Amp")) ops.select = -1;
-        ImGui::EndPopup();
+    // overlay/arte por cima do card inteiro (nao bloqueia cliques)
+    if (tex && tex->overlay) {
+        DrawTexCover(dl, tex->overlay, p0, p1, S(12), IM_COL32(255, 255, 255, 205));
     }
 
-    ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
     ImGui::PopID();
@@ -633,12 +680,14 @@ static bool AssetRow(int index, const char* name, const char* sub, ImU32 color,
 
 // -------------------------------------------------------------------- header
 static void openUrl(const char* url);
+static void openFolder(const fs::path& p);
 
 struct HeaderRefs {
     AudioIO* audio;
     Engine* engine;
     bool* wantDevices;
     bool* showEditor;
+    bool* showPlugins;
     float meterIn, meterOut;
 };
 
@@ -664,15 +713,11 @@ static void DrawHeader(const ImVec2& pos, const ImVec2& size, HeaderRefs& r) {
 
     if (logoTex) {
         auto inf = globalTextureCache().info(logoTex);
-        // mantém a proporção dentro do quadrado logo x logo
         float sc = logo / (float)std::max(inf.w, inf.h);
         float w = inf.w * sc, h = inf.h * sc;
         ImVec2 a(lp.x + (logo - w) * 0.5f, lp.y + (logo - h) * 0.5f);
         dl->AddImage((ImTextureID)(intptr_t)inf.gl_id, a, ImVec2(a.x + w, a.y + h));
-    }
-    else {
-        const float logo = S(42);
-        ImVec2 lp(pos.x + S(16), pos.y + (size.y - logo) * 0.5f);
+    } else {
         dl->AddRectFilled(lp, ImVec2(lp.x + logo, lp.y + logo), pal::accent, S(11));
         ImVec2 lc(lp.x + logo * 0.5f, lp.y + logo * 0.5f);
         dl->AddCircleFilled(ImVec2(lc.x - logo * 0.17f, lc.y - logo * 0.24f), logo * 0.10f, IM_COL32(46, 34, 24, 255), 16);
@@ -682,43 +727,45 @@ static void DrawHeader(const ImVec2& pos, const ImVec2& size, HeaderRefs& r) {
         dl->AddCircleFilled(ImVec2(lc.x - logo * 0.11f, lc.y - logo * 0.03f), logo * 0.035f, pal::accent, 12);
         dl->AddCircleFilled(ImVec2(lc.x + logo * 0.11f, lc.y - logo * 0.03f), logo * 0.035f, pal::accent, 12);
         dl->AddCircleFilled(ImVec2(lc.x, lc.y + logo * 0.13f), logo * 0.045f, IM_COL32(46, 34, 24, 255), 12);
-
-        TextAt(dl, fontBold, ImVec2(lp.x + logo + S(12), pos.y + S(12)), pal::text, "PEDALS THE CAPYBARA");
-        TextAt(dl, fontSmall, ImVec2(lp.x + logo + S(13), pos.y + S(38)), pal::dim, "real-time guitar rig");
     }
-    
+    TextAtShadow(dl, fontBold, ImVec2(lp.x + logo + S(12), pos.y + S(12)), pal::text, "PEDALS THE CAPYBARA");
+    TextAt(dl, fontSmall, ImVec2(lp.x + logo + S(13), pos.y + S(38)), pal::dim, "real-time guitar rig");
 
     // ---- lado direito ----
     float x = pos.x + size.x - S(16);
     const float cy = pos.y + size.y * 0.5f;
 
-    // donation button
     {
-        ImVec2 bsize(S(112), S(30));
+        ImVec2 bsize(S(104), S(30));
         x -= bsize.x;
         ImGui::SetCursorScreenPos(ImVec2(x, cy - bsize.y * 0.5f));
         if (ImGui::Button("Donate", bsize)) openUrl("https://github.com/sponsors/gufavocapivara?frequency=one-time&sponsor=gufavocapivara");
         x -= S(8);
     }
-    // editor button
     {
         ImVec2 bsize(S(86), S(30));
         x -= bsize.x;
         ImGui::SetCursorScreenPos(ImVec2(x, cy - bsize.y * 0.5f));
         if (ImGui::Button("Editor", bsize)) *r.showEditor = !*r.showEditor;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lua pedal/amp editor");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lua pedal/amp editor and .pctp exporter");
         x -= S(8);
     }
-    // botao audio
     {
-        ImVec2 bsize(S(96), S(30));
+        ImVec2 bsize(S(92), S(30));
+        x -= bsize.x;
+        ImGui::SetCursorScreenPos(ImVec2(x, cy - bsize.y * 0.5f));
+        if (ImGui::Button("Plugins", bsize)) *r.showPlugins = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import packages, create a .pp pack, see errors");
+        x -= S(8);
+    }
+    {
+        ImVec2 bsize(S(88), S(30));
         x -= bsize.x;
         ImGui::SetCursorScreenPos(ImVec2(x, cy - bsize.y * 0.5f));
         if (ImGui::Button("Audio", bsize)) *r.wantDevices = true;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Audio devices");
         x -= S(14);
     }
-    // master + gain
     {
         float m = r.engine->master.load();
         x -= S(52);
@@ -731,7 +778,6 @@ static void DrawHeader(const ImVec2& pos, const ImVec2& size, HeaderRefs& r) {
         if (MiniKnob("GAIN", &g, 0.0f, 2.0f, pal::accent2, S(34))) r.engine->inGain.store(g);
         x -= S(14);
     }
-    // medidores
     {
         x -= S(92);
         ImGui::SetCursorScreenPos(ImVec2(x, cy - S(14)));
@@ -742,7 +788,6 @@ static void DrawHeader(const ImVec2& pos, const ImVec2& size, HeaderRefs& r) {
         MeterBar("IN", r.meterIn, S(92), S(28));
         x -= S(14);
     }
-    // status
     {
         float w = S(146), h = S(30);
         x -= w;
@@ -796,24 +841,7 @@ static void openFolder(const fs::path& p) {
 #endif
 }
 
-// Le os plugins Lua que chamaram newamp() e os registra na biblioteca de amps.
-static int loadLuaAmps(const PluginManager& pm, AmpLibrary& lib, TextureCache* cache) {
-    lib.clearPlugins();
-    int ok = 0;
-    for (const auto& info : pm.all()) {
-        if (info.script.empty()) continue;
-        auto path = pm.dir() / info.script;
-        LuaPedal probe(path, cache);
-        if (!probe.isAmp) continue;
-        if (!probe.error.empty()) { info.status = probe.error; continue; }
-        info.status = "ok";
-        lib.add(probe.name, [path, cache] { return std::make_unique<LuaPedal>(path, cache); }, true);
-        ++ok;
-    }
-    return ok;
-}
-
-// Carrega logo.png e reduz para N x N (mantendo proporção, fundo transparente).
+// Le o logo.png e reduz para N x N (mantendo proporcao, fundo transparente).
 static bool loadLogoIcon(std::vector<unsigned char>& px, int N) {
     int w = 0, h = 0, ch = 0;
     unsigned char* src = stbi_load("Assets/icon.png", &w, &h, &ch, 4);
@@ -833,7 +861,6 @@ static bool loadLogoIcon(std::vector<unsigned char>& px, int N) {
         int x1 = std::min(w, std::max(x0 + 1, (int)std::ceil(sx1)));
         int y1 = std::min(h, std::max(y0 + 1, (int)std::ceil(sy1)));
 
-        // média da região de origem (com alpha pré-multiplicado, sem borda escura)
         float r = 0, g = 0, b = 0, a = 0; int cnt = 0;
         for (int yy = y0; yy < y1; ++yy) for (int xx = x0; xx < x1; ++xx) {
             const unsigned char* s = &src[((size_t)yy * w + xx) * 4];
@@ -853,18 +880,17 @@ static bool loadLogoIcon(std::vector<unsigned char>& px, int N) {
 }
 
 static void buildWindowIcon(std::vector<unsigned char>& px, int N) {
-    if (loadLogoIcon(px, N)) return;   // usa o logo.png se existir
+    if (loadLogoIcon(px, N)) return;
 
-    // ---- fallback: capivara desenhada ----
     px.assign((size_t)N * N * 4, 0);
     auto inRound = [&](float x, float y, float r) {
         float cx = std::clamp(x, r, (float)N - r), cy = std::clamp(y, r, (float)N - r);
         return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
-        };
+    };
     auto inEllipse = [&](float x, float y, float cx, float cy, float rx, float ry) {
         float dx = (x - cx) / rx, dy = (y - cy) / ry;
         return dx * dx + dy * dy <= 1.0f;
-        };
+    };
     for (int y = 0; y < N; ++y) for (int x = 0; x < N; ++x) {
         float fx = x + 0.5f, fy = y + 0.5f;
         unsigned char* p = &px[((size_t)y * N + x) * 4];
@@ -883,6 +909,40 @@ static void buildWindowIcon(std::vector<unsigned char>& px, int N) {
     }
 }
 
+// --------------------------------------------------------------------- toasts
+struct Toast {
+    std::string text;
+    bool error = false;
+    double until = 0.0;
+};
+static Toast g_toast;
+static std::vector<std::string> g_droppedPaths;
+
+static void ShowToast(const std::string& text, bool error = false) {
+    g_toast.text = text;
+    g_toast.error = error;
+    g_toast.until = glfwGetTime() + (error ? 7.0 : 4.0);
+}
+
+static void DrawToast(const ImGuiViewport* vp, float statusH) {
+    if (g_toast.text.empty() || glfwGetTime() > g_toast.until) return;
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - S(16), vp->Pos.y + vp->Size.y - statusH - S(14)),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.96f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                          g_toast.error ? ImVec4(0.30f, 0.10f, 0.10f, 0.96f) : ImVec4(0.08f, 0.14f, 0.11f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+                          g_toast.error ? ImVec4(0.85f, 0.30f, 0.25f, 1) : ImVec4(0.30f, 0.75f, 0.45f, 1));
+    ImGui::Begin("##toast", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::PushTextWrapPos(S(360));
+    ImGui::TextWrapped("%s", g_toast.text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+}
+
+// ---------------------------------------------------------------------- main
 int main() {
 #if defined(_WIN32)
     SetProcessDPIAware();
@@ -898,8 +958,8 @@ int main() {
     if (GLFWmonitor* mon = glfwGetPrimaryMonitor())
         glfwGetMonitorWorkarea(mon, &workX, &workY, &workW, &workH);
 
-    int winW = std::min((int)(1400 * g_scale), (int)(workW * 0.94f));
-    int winH = std::min((int)(860 * g_scale), (int)(workH * 0.94f));
+    int winW = std::min((int)(1440 * g_scale), (int)(workW * 0.94f));
+    int winH = std::min((int)(880 * g_scale), (int)(workH * 0.94f));
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -912,6 +972,10 @@ int main() {
     glfwSetWindowPos(window, workX + (workW - winW) / 2, workY + (workH - winH) / 2);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    glfwSetDropCallback(window, [](GLFWwindow*, int count, const char** paths) {
+        for (int i = 0; i < count; ++i) if (paths[i]) g_droppedPaths.emplace_back(paths[i]);
+    });
 
     {
         std::vector<unsigned char> icon;
@@ -941,26 +1005,14 @@ int main() {
 
     PluginManager pluginManager;
     TextureCache& texCache = globalTextureCache();
-    loadLuaPlugins(pluginManager, library, &texCache);
-    loadLuaAmps(pluginManager, ampLibrary, &texCache);
 
-    if (auto m = ampLibrary.create(0)) {
-        m->enabled = true;
-        board.setAmp(std::move(m));
-    }
+    auto reloadPlugins = [&] {
+        pluginManager.refresh();
+        loadLuaPlugins(pluginManager, library, ampLibrary, &texCache);
+    };
+    reloadPlugins();
 
-    static PluginEditor editor;
-    auto reloadAmps = [&] { loadLuaAmps(pluginManager, ampLibrary, &texCache); };
-    editor.ampSink = [&](std::unique_ptr<Pedal> a) { board.setAmp(std::move(a)); };
-    editor.ampReloader = reloadAmps;
-
-    std::string pluginsAbsPath;
-    {
-        std::error_code ec;
-        pluginsAbsPath = fs::absolute(pluginManager.dir(), ec).string();
-    }
-
-    // Cadeia inicial: gate ligado, drive/delay prontos para ligar.
+    // Cadeia inicial: gate ligado, drive/delay prontos para ligar e um amp.
     for (const char* n : { "Noise Gate", "Overdrive", "Delay" })
         for (int i = 0; i < (int)library.all().size(); ++i)
             if (library.all()[i].name == n) {
@@ -969,8 +1021,58 @@ int main() {
                 p->enabled = (std::string(n) == "Noise Gate");
                 board.add(std::move(p));
             }
+    if (auto a = ampLibrary.create(0)) {
+        a->enabled = true;
+        board.add(std::move(a));
+    }
 
-    float assetsW = S(252);
+    static PluginEditor editor;
+    editor.textures = &texCache;
+    editor.reload = reloadPlugins;
+    editor.addPedal = [&](std::unique_ptr<Pedal> p) {
+        if (board.add(std::move(p)) < 0) ShowToast("The signal chain is full (maximum 15 slots).", true);
+    };
+
+    auto importPath = [&](const fs::path& source) {
+        std::string err;
+        fs::path installed;
+        if (pluginManager.importFile(source, err, &installed)) {
+            reloadPlugins();
+            ShowToast("Imported: " + (installed.empty() ? source.filename().string() : installed.filename().string()));
+        } else {
+            ShowToast("Import failed: " + err, true);
+        }
+    };
+
+    auto importDialog = [&] {
+        auto files = pfd::open_file("Import plugin or plugin pack", "",
+            { "Pedals the Capybara", "*.pctp *.pp *.ptc *.lua",
+              "Plugin package (*.pctp)", "*.pctp",
+              "Plugin pack (*.pp)", "*.pp",
+              "All files", "*" },
+            pfd::opt::multiselect).result();
+        for (const auto& f : files) importPath(f);
+    };
+
+    auto createPackDialog = [&] {
+        const std::string folder = pfd::select_folder("Select the folder with your plugins").result();
+        if (folder.empty()) return;
+        const fs::path src(folder);
+        const std::string def = src.filename().string() + ".pp";
+        const std::string out = pfd::save_file("Save plugin pack (.pp)", def,
+            { "Plugin pack (*.pp)", "*.pp" }).result();
+        if (out.empty()) return;
+        std::string err;
+        int count = 0;
+        if (pluginManager.createPackFromFolder(src, out, src.filename().string(), "", err, &count)) {
+            ShowToast("Pack created with " + std::to_string(count) + " plugin(s): " + fs::path(out).filename().string());
+            importPath(out);
+        } else {
+            ShowToast("Could not create pack: " + err, true);
+        }
+    };
+
+    float assetsW = S(288);
     char filter[64] = "";
     bool wantOpenDevices = false;
     int inSel = 0, outSel = 0;
@@ -983,11 +1085,11 @@ int main() {
     bool showGuiPlugins = false;
     bool showEditor = false;
     bool showAbout = false;
-    bool firstFrame = true;
 
     // Sobe o audio automaticamente com os dispositivos padrao.
     if (!audio.start(inSel - 1, outSel - 1, exclusive, kBuffers[bufferSel], audioErr)) {
         wantOpenDevices = true;
+        ShowToast("Audio could not start: " + audioErr, true);
     }
 
     while (!glfwWindowShouldClose(window) && !wantQuit) {
@@ -997,6 +1099,20 @@ int main() {
         ImGui::NewFrame();
         board.gc();
 
+        // Arquivos arrastados para a janela.
+        if (!g_droppedPaths.empty()) {
+            for (const auto& path : g_droppedPaths) {
+                const std::string ext = lowerAscii(fs::path(path).extension().string());
+                if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
+                    showEditor = true;
+                    if (!editor.addImageFile(path)) ShowToast("Could not read image: " + path, true);
+                } else {
+                    importPath(path);
+                }
+            }
+            g_droppedPaths.clear();
+        }
+
         float menuH = 0;
         {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(12), S(6)));
@@ -1004,6 +1120,9 @@ int main() {
                 menuH = ImGui::GetWindowSize().y;
                 if (ImGui::BeginMenu("File")) {
                     if (ImGui::MenuItem("New pedalboard")) board.clear();
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Import plugin / package...")) importDialog();
+                    if (ImGui::MenuItem("Create plugin pack (.pp)...")) createPackDialog();
                     ImGui::Separator();
                     if (ImGui::MenuItem("Exit")) wantQuit = true;
                     ImGui::EndMenu();
@@ -1021,7 +1140,11 @@ int main() {
                     if (ImGui::MenuItem("Lua Editor", nullptr, &showEditor)) {}
                     if (ImGui::MenuItem("Installed Plugins", nullptr, &showGuiPlugins)) {}
                     ImGui::Separator();
+                    if (ImGui::MenuItem("Import .pctp / .pp...")) importDialog();
+                    if (ImGui::MenuItem("Create plugin pack (.pp)...")) createPackDialog();
+                    ImGui::Separator();
                     if (ImGui::MenuItem("Open Plugins Folder")) openFolder(pluginManager.dir());
+                    if (ImGui::MenuItem("Open Packs Folder")) openFolder(pluginManager.packsDir());
                     ImGui::EndMenu();
                 }
                 if (ImGui::BeginMenu("Help")) {
@@ -1042,7 +1165,6 @@ int main() {
         float bodyH = areaH - headerH - statusH;
         float bodyW = vp->Size.x;
 
-        // medidores com decay
         meterIn = std::max(meterIn * 0.90f, engine.inPeak.load());
         meterOut = std::max(meterOut * 0.90f, engine.outPeak.load());
 
@@ -1051,6 +1173,7 @@ int main() {
         hr.engine = &engine;
         hr.wantDevices = &wantOpenDevices;
         hr.showEditor = &showEditor;
+        hr.showPlugins = &showGuiPlugins;
         hr.meterIn = std::clamp((20.0f * std::log10(meterIn + 1e-6f) + 60.0f) / 60.0f, 0.0f, 1.0f);
         hr.meterOut = std::clamp((20.0f * std::log10(meterOut + 1e-6f) + 60.0f) / 60.0f, 0.0f, 1.0f);
         DrawHeader(areaPos, ImVec2(vp->Size.x, headerH), hr);
@@ -1060,10 +1183,9 @@ int main() {
             ImGuiWindowFlags_NoSavedSettings;
 
         BoardOps ops;
-        AmpOps ampOps;
 
         // ---- painel de assets ----
-        assetsW = std::clamp(assetsW, S(200), bodyW * 0.45f);
+        assetsW = std::clamp(assetsW, S(230), bodyW * 0.48f);
         ImGui::SetNextWindowPos(ImVec2(areaPos.x, bodyY));
         ImGui::SetNextWindowSize(ImVec2(assetsW, bodyH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.078f, 0.090f, 0.110f, 1));
@@ -1074,78 +1196,120 @@ int main() {
         ImGui::SameLine();
         ImGui::TextDisabled("  double-click or drag");
         ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##filtro", "search...", filter, sizeof(filter));
+        ImGui::InputTextWithHint("##filtro", "search by name, category or pack...", filter, sizeof(filter));
         ImGui::Spacing();
 
-        if (ImGui::BeginTabBar("##abas", ImGuiTabBarFlags_FittingPolicyScroll)) {
-            if (ImGui::BeginTabItem("Pedals")) {
-                std::vector<std::string> cats;
-                for (auto& a : library.all())
-                    if (!a.fromPlugin && a.category != "Amps" &&
-                        std::find(cats.begin(), cats.end(), a.category) == cats.end())
-                        cats.push_back(a.category);
-                ImGui::BeginChild("##listapedais", ImVec2(0, -S(34)), ImGuiChildFlags_None);
-                for (auto& cat : cats) {
-                    ImVec4 cc = catColorVec(cat);
-                    ImGui::PushStyleColor(ImGuiCol_Text, cc);
-                    ImGui::TextUnformatted(cat.c_str());
-                    ImGui::PopStyleColor();
-                    for (int i = 0; i < (int)library.all().size(); ++i) {
-                        const PedalAsset& a = library.all()[i];
-                        if (a.fromPlugin || a.category != cat) continue;
-                        if (!ContainsNoCase(a.name, filter)) continue;
-                        if (AssetRow(i, a.name.c_str(), a.category.c_str(), ImGui::GetColorU32(cc), false, false, "ASSET")) {
-                            ops.addAsset = i; ops.addAt = -1;
-                        }
+        auto drawPedalGroup = [&](bool onlyPlugins) {
+            std::vector<std::string> cats;
+            for (auto& a : library.all()) {
+                if (onlyPlugins && !a.fromPlugin) continue;
+                if (std::find(cats.begin(), cats.end(), a.category) == cats.end()) cats.push_back(a.category);
+            }
+            for (auto& cat : cats) {
+                ImVec4 cc = catColorVec(cat);
+                ImGui::PushStyleColor(ImGuiCol_Text, cc);
+                ImGui::TextUnformatted(cat.c_str());
+                ImGui::PopStyleColor();
+                for (int i = 0; i < (int)library.all().size(); ++i) {
+                    const PedalAsset& a = library.all()[i];
+                    if (onlyPlugins && !a.fromPlugin) continue;
+                    if (a.category != cat) continue;
+                    if (!ContainsNoCase(a.name, filter) && !ContainsNoCase(a.category, filter) &&
+                        !ContainsNoCase(a.source, filter)) continue;
+                    const std::string sub = a.fromPlugin
+                        ? (a.source.empty() ? std::string("Lua plugin") : "Lua plugin - " + a.source)
+                        : a.category;
+                    if (AssetRow(i, a.name.c_str(), sub.c_str(), ImGui::GetColorU32(cc), false, false, "ASSET")) {
+                        ops.addAsset = i; ops.addAt = -1;
                     }
-                    ImGui::Spacing();
                 }
+                ImGui::Spacing();
+            }
+        };
+
+        auto drawAmpGroup = [&](bool onlyPlugins) {
+            bool any = false;
+            for (int i = 0; i < (int)ampLibrary.all().size(); ++i) {
+                const AmpAsset& a = ampLibrary.all()[i];
+                if (onlyPlugins && !a.fromPlugin) continue;
+                if (!ContainsNoCase(a.name, filter) && !ContainsNoCase(a.source, filter)) continue;
+                any = true;
+                const std::string sub = a.fromPlugin ? "Amp - " + a.source : "Native amp";
+                if (AssetRow(10000 + i, a.name.c_str(), sub.c_str(),
+                             ImGui::GetColorU32(catColorVec("Amps")), false, false, "AMP")) {
+                    ops.addAmp = i; ops.addAt = -1;
+                }
+            }
+            if (!any) ImGui::TextDisabled(onlyPlugins ? "No plugin amps found." : "No amps found.");
+        };
+
+        if (ImGui::BeginTabBar("##abas", ImGuiTabBarFlags_FittingPolicyScroll)) {
+            if (ImGui::BeginTabItem("All")) {
+                ImGui::BeginChild("##lista_all", ImVec2(0, -S(36)), ImGuiChildFlags_None);
+                drawPedalGroup(false);
+                ImVec4 cc = catColorVec("Amps");
+                ImGui::PushStyleColor(ImGuiCol_Text, cc);
+                ImGui::TextUnformatted("Amps");
+                ImGui::PopStyleColor();
+                drawAmpGroup(false);
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Pedals")) {
+                ImGui::BeginChild("##listapedais", ImVec2(0, -S(36)), ImGuiChildFlags_None);
+                drawPedalGroup(false);
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Amps")) {
-                ImGui::TextDisabled("Double-click to change the amp (last in the chain).");
-                ImGui::BeginChild("##listaamps", ImVec2(0, -S(34)), ImGuiChildFlags_None);
-                for (int i = 0; i < (int)ampLibrary.all().size(); ++i) {
-                    const AmpAsset& a = ampLibrary.all()[i];
-                    if (!ContainsNoCase(a.name, filter)) continue;
-                    if (AssetRow(1000 + i, a.name.c_str(), a.fromPlugin ? "plugin" : "nativo",
-                                 ImGui::GetColorU32(catColorVec("Amps")), false, false, "AMP")) {
-                        ampOps.select = i;
-                    }
-                }
+                ImGui::TextDisabled("Amps are normal pedals: drag one into the chain.");
+                ImGui::BeginChild("##listaamps", ImVec2(0, -S(36)), ImGuiChildFlags_None);
+                drawAmpGroup(false);
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("My Plugins")) {
-                std::vector<std::string> cats;
-                for (auto& a : library.all())
-                    if (a.fromPlugin && std::find(cats.begin(), cats.end(), a.category) == cats.end())
-                        cats.push_back(a.category);
-                ImGui::BeginChild("##listaplugins", ImVec2(0, -S(34)), ImGuiChildFlags_None);
-                for (auto& cat : cats) {
-                    ImVec4 cc = catColorVec(cat);
-                    ImGui::PushStyleColor(ImGuiCol_Text, cc);
-                    ImGui::TextUnformatted(cat.c_str());
-                    ImGui::PopStyleColor();
-                    for (int i = 0; i < (int)library.all().size(); ++i) {
-                        const PedalAsset& a = library.all()[i];
-                        if (!a.fromPlugin || a.category != cat) continue;
-                        if (!ContainsNoCase(a.name, filter)) continue;
-                        if (AssetRow(i, a.name.c_str(), "Lua plugin", ImGui::GetColorU32(cc), false, false, "ASSET")) {
-                            ops.addAsset = i; ops.addAt = -1;
-                        }
-                    }
-                    ImGui::Spacing();
+                ImGui::BeginChild("##listaplugins", ImVec2(0, -S(36)), ImGuiChildFlags_None);
+                drawPedalGroup(true);
+                drawAmpGroup(true);
+                if (!std::any_of(library.all().begin(), library.all().end(),
+                                 [](const PedalAsset& a) { return a.fromPlugin; }) &&
+                    !std::any_of(ampLibrary.all().begin(), ampLibrary.all().end(),
+                                 [](const AmpAsset& a) { return a.fromPlugin; }))
+                    ImGui::TextDisabled("No plugins yet. Import a .pctp/.pp or use the editor.");
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Packs")) {
+                std::map<std::string, int> packs;
+                for (const auto& p : pluginManager.all())
+                    if (!p.packName.empty()) packs[p.packName]++;
+                ImGui::BeginChild("##listapacks", ImVec2(0, -S(36)), ImGuiChildFlags_None);
+                if (packs.empty()) {
+                    ImGui::TextDisabled("No plugin packs installed.");
+                    ImGui::TextWrapped("A .pp pack is a ZIP with several plugins. Use \"Create pack\" to turn a folder into one.");
                 }
-                if (cats.empty()) ImGui::TextDisabled("No plugins found in Plugins/*.ptc");
+                for (const auto& kv : packs) {
+                    ImGui::PushID(kv.first.c_str());
+                    ImGui::TextUnformatted(kv.first.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%d plugin%s)", kv.second, kv.second == 1 ? "" : "s");
+                    ImGui::PopID();
+                }
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
         }
 
-        if (ImGui::Button("Open Plugins Folder", ImVec2(-1, S(26)))) openFolder(pluginManager.dir());
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(6), S(5)));
+        const float third = (ImGui::GetContentRegionAvail().x - S(8)) / 3.0f;
+        if (ImGui::Button("Import...", ImVec2(third, 0))) importDialog();
+        ImGui::SameLine();
+        if (ImGui::Button("Create pack...", ImVec2(third, 0))) createPackDialog();
+        ImGui::SameLine();
+        if (ImGui::Button("Manage...", ImVec2(third, 0))) showGuiPlugins = true;
+        ImGui::PopStyleVar();
         ImGui::End();
         ImGui::PopStyleColor();
 
@@ -1157,13 +1321,30 @@ int main() {
         ImGui::TextUnformatted("SIGNAL CHAIN");
         ImGui::PopFont();
         ImGui::SameLine(0, S(14));
-        ImGui::TextDisabled("guitar -> pedals -> AMP -> speakers");
+        ImGui::TextDisabled("guitar -> pedals + amp -> speakers");
         ImGui::SameLine(0, S(24));
-        ImGui::TextDisabled("%d pedal%s", board.size(), board.size() == 1 ? "" : "s");
+        ImGui::TextDisabled("%d slot%s", board.size(), board.size() == 1 ? "" : "s");
+        ImGui::SameLine(0, S(20));
+        if (board.ampIndex() < 0) {
+            if (ImGui::SmallButton("Add an amp")) ImGui::OpenPopup("##quickamp");
+            if (ImGui::BeginPopup("##quickamp")) {
+                for (int i = 0; i < (int)ampLibrary.all().size(); ++i)
+                    if (ImGui::MenuItem(ampLibrary.all()[i].name.c_str())) {
+                        ops.addAmp = i; ops.addAt = -1;
+                    }
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no amp yet)");
+        } else {
+            ImGui::TextDisabled("AMP: %s", board.amp()->name.c_str());
+        }
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - S(60));
+        if (ImGui::SmallButton("Clear")) board.clear();
         ImGui::Spacing();
 
-        float maxCardH = S(170);
-        for (int i = 0; i < board.size(); ++i) maxCardH = std::max(maxCardH, CardHFor(*board.at(i), 3, S(96)));
+        float maxCardH = S(230);
+        for (int i = 0; i < board.size(); ++i) maxCardH = std::max(maxCardH, SizeFor(*board.at(i)).h);
         float boardH = maxCardH + S(34);
         ImGui::BeginChild("##board", ImVec2(0, boardH), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
         if (board.size() == 0) {
@@ -1174,7 +1355,7 @@ int main() {
             TextCentered(dl, fontSemi, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - S(10)), pal::dim,
                          "Your signal chain is empty");
             TextCentered(dl, fontSmall, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f + S(12)), pal::dim,
-                         "drag a pedal from the library or double-click it");
+                         "drag a pedal or amp from the library, or double-click it");
         }
         for (int pos = 0; pos < board.size(); ++pos) {
             DropSlot(pos, S(kSlotW), maxCardH, ops, false);
@@ -1185,25 +1366,10 @@ int main() {
         DropSlot(board.size(), S(230), maxCardH, ops, true);
         ImGui::EndChild();
 
-        ImGui::Spacing();
-        ImGui::PushFont(fontSemi);
-        ImGui::TextUnformatted("AMPLIFIER");
-        ImGui::PopFont();
-        ImGui::SameLine(0, S(14));
-        ImGui::TextDisabled("last stage, always after the pedals");
-        float ampH = board.amp() ? AmpCardSize(*board.amp()).y : S(230);
-        ImGui::BeginChild("##amprow", ImVec2(0, ampH + S(10)), ImGuiChildFlags_Borders,
-                          ImGuiWindowFlags_HorizontalScrollbar);
-        if (Pedal* a = board.amp()) AmpCard(*a, ampLibrary, ampOps);
-        else {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 r0 = ImGui::GetCursorScreenPos();
-            ImVec2 r1 = ImVec2(r0.x + ImGui::GetContentRegionAvail().x - S(4), r0.y + S(200));
-            dl->AddRect(r0, r1, pal::border, S(10), 0, S(1.5f));
-            TextCentered(dl, fontSemi, ImVec2((r0.x + r1.x) * 0.5f, (r0.y + r1.y) * 0.5f), pal::dim,
-                         "No amp: choose one from the Amps tab");
+        if (board.ampIndex() < 0) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Tip: an amp is a normal pedal here. Open the Amps tab and double-click one; it is placed in the chain and can be dragged anywhere.");
         }
-        ImGui::EndChild();
         ImGui::End();
 
         // ---- divisor ----
@@ -1229,31 +1395,30 @@ int main() {
             ImGui::PopStyleVar();
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetWindowPos();
-            char left[160];
+            char left[200];
             if (audio.running())
-                std::snprintf(left, sizeof(left), "%.0f Hz  |  buffer %d  |  CPU %.1f%%  |  %d pedals",
-                    (float)audio.sampleRate(), audio.bufferSize(), engine.cpuLoad.load(), board.size());
+                std::snprintf(left, sizeof(left), "%.0f Hz  |  buffer %d  |  CPU %.1f%%  |  %d slots  |  %d plugins",
+                    (float)audio.sampleRate(), audio.bufferSize(), engine.cpuLoad.load(), board.size(),
+                    (int)pluginManager.all().size());
             else
-                std::snprintf(left, sizeof(left), "audio stopped  |  %d pedals", board.size());
+                std::snprintf(left, sizeof(left), "audio stopped  |  %d slots  |  %d plugins",
+                    board.size(), (int)pluginManager.all().size());
             TextAt(dl, fontSmall, ImVec2(p.x + S(12), p.y + (statusH - fontSmall->FontSize) * 0.5f), pal::dim, left);
             char right[300];
-            std::snprintf(right, sizeof(right), "Plugins: %s", pluginsAbsPath.c_str());
+            std::snprintf(right, sizeof(right), "Plugins: %s", pluginManager.dir().string().c_str());
             float tw = fontSmall->CalcTextSizeA(fontSmall->FontSize, FLT_MAX, 0.0f, right).x;
             TextAt(dl, fontSmall, ImVec2(p.x + vp->Size.x - S(12) - tw, p.y + (statusH - fontSmall->FontSize) * 0.5f),
                    pal::dim, right);
-            if (!audioErr.empty())
-                TextAt(dl, fontSmall, ImVec2(p.x + S(12), p.y + (statusH - fontSmall->FontSize) * 0.5f - S(22)),
-                       pal::red, audioErr.c_str());
             ImGui::End();
         }
 
         // ---- editor (janela flutuante) ----
         if (showEditor) {
-            ImGui::SetNextWindowSize(ImVec2(S(900), S(620)), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(S(980), S(660)), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f),
                                     ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
             if (ImGui::Begin("Pedal Editor (Lua)", &showEditor, ImGuiWindowFlags_NoCollapse)) {
-                editor.draw(board, pluginManager, library);
+                editor.draw(board, pluginManager);
             }
             ImGui::End();
         }
@@ -1293,6 +1458,8 @@ int main() {
                 audioErr.clear();
                 if (audio.start(inSel - 1, outSel - 1, exclusive, kBuffers[bufferSel], audioErr))
                     ImGui::CloseCurrentPopup();
+                else
+                    ShowToast("Audio could not start: " + audioErr, true);
             }
             ImGui::SameLine();
             if (audio.running() && ImGui::Button("Stop", ImVec2(S(120), 0))) audio.stop();
@@ -1301,47 +1468,110 @@ int main() {
             ImGui::EndPopup();
         }
 
-        // ---- plugins instalados ----
+        // ---- gerenciador de plugins ----
         if (showGuiPlugins) {
             static ImGuiTextFilter pluginFilter;
             static int selected = -1;
-            ImGui::SetNextWindowSize(ImVec2(S(460), S(500)), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Installed Plugins", &showGuiPlugins, ImGuiWindowFlags_NoCollapse)) {
-                pluginFilter.Draw("##busca", -S(80));
+            ImGui::SetNextWindowSize(ImVec2(S(620), S(560)), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Installed Plugins & Packs", &showGuiPlugins, ImGuiWindowFlags_NoCollapse)) {
+                if (ImGui::Button("Import .pctp / .pp...")) importDialog();
+                ImGui::SameLine();
+                if (ImGui::Button("Create .pp from folder...")) createPackDialog();
                 ImGui::SameLine();
                 if (ImGui::Button("Refresh")) {
-                    pluginManager.refresh();
-                    loadLuaPlugins(pluginManager, library, &texCache);
-                    reloadAmps();
+                    reloadPlugins();
                     selected = -1;
+                    ShowToast("Plugin library reloaded.");
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Open folder")) openFolder(pluginManager.dir());
+
+                pluginFilter.Draw("##busca", -1);
                 ImGui::Separator();
-                ImGui::TextDisabled("%s", pluginsAbsPath.c_str());
+                ImGui::TextDisabled("%s", pluginManager.dir().string().c_str());
+                ImGui::TextDisabled("Formats: .pctp (one plugin), .pp (pack), .ptc/.lua (folder plugin)");
+
                 const auto& plist = pluginManager.all();
-                if (ImGui::BeginChild("##listaPlugins", ImVec2(0, -S(160)), ImGuiChildFlags_None)) {
-                    if (plist.empty()) ImGui::TextDisabled("No plugins (.ptc) found");
+                if (ImGui::BeginChild("##listaPlugins", ImVec2(0, -S(190)), ImGuiChildFlags_Borders)) {
+                    if (plist.empty()) ImGui::TextDisabled("No plugins found.");
                     for (int i = 0; i < (int)plist.size(); ++i) {
                         const auto& p = plist[i];
-                        if (!pluginFilter.PassFilter(p.name.c_str()) && !pluginFilter.PassFilter(p.description.c_str()))
-                            continue;
-                        if (ImGui::Selectable(p.name.c_str(), selected == i)) selected = i;
-                        if (ImGui::IsItemHovered() && !p.description.empty())
-                            ImGui::SetTooltip("%s", p.description.c_str());
+                        if (!pluginFilter.PassFilter(p.name.c_str()) &&
+                            !pluginFilter.PassFilter(p.description.c_str()) &&
+                            !pluginFilter.PassFilter(p.packName.c_str()) &&
+                            !pluginFilter.PassFilter(p.file.c_str())) continue;
+                        const bool bad = !p.status.empty() && p.status != "ok";
+                        ImGui::PushStyleColor(ImGuiCol_Text, bad ? ImVec4(0.95f, 0.42f, 0.36f, 1)
+                                                                 : ImGui::GetStyleColorVec4(ImGuiCol_Text));
+                        char label[256];
+                        std::snprintf(label, sizeof(label), "%s%s###p%d", p.name.c_str(),
+                                      p.isAmp ? "  [AMP]" : "", i);
+                        if (ImGui::Selectable(label, selected == i)) selected = i;
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s\n%s\nSource: %s\nStatus: %s",
+                                p.file.c_str(),
+                                p.description.empty() ? "(no description)" : p.description.c_str(),
+                                p.sourceLabel().c_str(),
+                                p.status.empty() ? "not loaded" : p.status.c_str());
+                        }
                     }
                 }
                 ImGui::EndChild();
                 ImGui::Separator();
                 if (selected >= 0 && selected < (int)plist.size()) {
                     const auto& p = plist[selected];
+                    ImGui::PushFont(fontSemi);
                     ImGui::TextUnformatted(p.name.c_str());
-                    ImGui::TextDisabled("%s", p.file.c_str());
+                    ImGui::PopFont();
+                    ImGui::SameLine();
+                    if (p.isAmp) ImGui::TextDisabled("[AMP]");
+                    ImGui::TextDisabled("%s  |  %s%s%s", p.file.c_str(), p.sourceLabel().c_str(),
+                        p.packName.empty() ? "" : "  |  pack: ", p.packName.c_str());
+                    if (!p.author.empty() || !p.version.empty())
+                        ImGui::TextDisabled("Author: %s   Version: %s", p.author.c_str(), p.version.c_str());
                     ImGui::TextWrapped("%s", p.description.empty() ? "(no description)" : p.description.c_str());
                     if (!p.status.empty() && p.status != "ok")
                         ImGui::TextColored(ImVec4(1, 0.4f, 0.35f, 1), "Error: %s", p.status.c_str());
-                    if (!p.script.empty() && ImGui::Button("Edit in Editor"))
-                        editor.openFile(pluginManager.dir() / p.script, p.name, p.description);
+                    else
+                        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.5f, 1), "Loaded and ready.");
+                    if (!p.script.empty() && ImGui::Button("Edit in Editor")) {
+                        editor.openPlugin(p);
+                        showEditor = true;
+                    }
+                    ImGui::SameLine();
+                    const bool packItem = p.fromPack && !p.packFile.empty();
+                    const char* delLabel = packItem ? "Delete pack..." : "Delete...";
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.16f, 0.14f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.60f, 0.20f, 0.18f, 1.0f));
+                    if (ImGui::Button(delLabel)) ImGui::OpenPopup("Delete plugin?");
+                    ImGui::PopStyleColor(2);
+                    if (ImGui::BeginPopupModal("Delete plugin?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                        if (packItem)
+                            ImGui::TextWrapped("Delete pack '%s' (%s) and all plugins inside it?", p.packName.c_str(), p.packFile.c_str());
+                        else
+                            ImGui::TextWrapped("Delete plugin '%s' (%s)?", p.name.c_str(), p.file.c_str());
+                        ImGui::TextDisabled("This removes files from disk. Plugins already in the chain keep working until removed.");
+                        ImGui::Spacing();
+                        if (ImGui::Button("Delete", ImVec2(S(120), 0))) {
+                            std::string err;
+                            bool ok = packItem ? pluginManager.removePack(p.packFile, err)
+                                               : pluginManager.removePlugin(p, err);
+                            if (ok) {
+                                reloadPlugins();
+                                selected = -1;
+                                ShowToast(packItem ? "Pack deleted." : "Plugin deleted.");
+                            } else {
+                                ShowToast("Delete failed: " + err, true);
+                            }
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel", ImVec2(S(120), 0))) ImGui::CloseCurrentPopup();
+                        ImGui::EndPopup();
+                    }
                 } else {
-                    ImGui::TextDisabled("Select a plugin to view its description.");
+                    ImGui::TextDisabled("Select a plugin to see details and edit its script.");
                 }
             }
             ImGui::End();
@@ -1354,11 +1584,11 @@ int main() {
             ImGui::PushFont(fontBold);
             ImGui::TextUnformatted("Pedals the Capybara");
             ImGui::PopFont();
-            ImGui::TextDisabled("Real-time pedalboard and amps with Lua pedals.");
+            ImGui::TextDisabled("Real-time pedalboard, amps and Lua plugins.");
             ImGui::Separator();
-            ImGui::Text("Drag the cards to reorder the signal chain.");
-            ImGui::Text("Knob: drag vertically, use the mouse wheel, Shift = fine adjustment, double-click = default.");
-            ImGui::Text("The amp is always the last stage in the signal chain.");
+            ImGui::Text("Drag cards to reorder. The amp is a normal card in the chain.");
+            ImGui::Text("Knob: drag vertically, mouse wheel, Shift = fine, double-click = default.");
+            ImGui::Text("Plugins: .pctp (one plugin) or .pp (a pack of plugins), both ZIP files.");
             ImGui::Separator();
             if (ImGui::Button("Close", ImVec2(S(120), 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
@@ -1369,14 +1599,14 @@ int main() {
         else if (ops.moveFrom >= 0) board.move(ops.moveFrom, ops.moveTo);
         else if (ops.addAsset >= 0) {
             if (auto p = library.create(ops.addAsset)) { p->enabled = true; board.add(std::move(p), ops.addAt); }
-        }
-        if (ampOps.select != -2) {
-            if (ampOps.select >= 0) {
-                if (auto a = ampLibrary.create(ampOps.select)) { a->enabled = true; board.setAmp(std::move(a)); }
-            } else {
-                board.setAmp(nullptr);
+        } else if (ops.addAmp >= 0) {
+            if (auto a = ampLibrary.create(ops.addAmp)) {
+                a->enabled = true;
+                if (board.add(std::move(a), ops.addAt) < 0) ShowToast("The signal chain is full.", true);
             }
         }
+
+        DrawToast(vp, statusH);
 
         // ---- render ----
         ImGui::Render();
@@ -1386,10 +1616,11 @@ int main() {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
-        (void)firstFrame;
     }
 
     audio.stop();
+    board.destroyAllNow();       // libera texturas com o contexto OpenGL ainda vivo
+    texCache.clear();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

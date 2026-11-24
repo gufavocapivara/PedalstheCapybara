@@ -1,0 +1,6 @@
+NAME=Velvet Chorus
+DESCRIPTION=Warm chorus modulation with real artwork.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=velvet_chorus.lua
+ICON=assets/face.png

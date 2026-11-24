@@ -1,0 +1,6 @@
+NAME=BOSS MT-2 Metal Zone (Inspired)
+DESCRIPTION=Inspired by BOSS MT-2 controls: Level, Dist, High, Low, Mid, Mid Freq. Original DSP model, not schematic-accurate or affiliated with BOSS/Roland.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=boss_mt2.lua
+ICON=assets/face.png

@@ -1,0 +1,6 @@
+NAME=CN Rotary/Chorus (Inspired)
+DESCRIPTION=Modulação suave para largura e movimento. Controles: Rate, Depth, Mix, Tone. DSP original.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=cn_mod.lua
+ICON=assets/face.png

@@ -1,0 +1,6 @@
+NAME=Capybara Drive
+DESCRIPTION=Warm overdrive with real images (face, knobs, LED and footswitch).
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=capybara_drive.lua
+ICON=capybara_drive_assets/face.png

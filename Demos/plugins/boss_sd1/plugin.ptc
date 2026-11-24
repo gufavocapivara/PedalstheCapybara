@@ -1,0 +1,6 @@
+NAME=BOSS SD-1 Super OverDrive (Inspired)
+DESCRIPTION=Inspired by BOSS SD-1 controls: Level, Tone, Drive. Original DSP model, not schematic-accurate or affiliated with BOSS/Roland.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=boss_sd1.lua
+ICON=assets/face.png

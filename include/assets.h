@@ -14,8 +14,10 @@ namespace gp {
 
     struct PedalAsset {
         std::string name, category;
+        std::string source;        // "Native", nome do pack ou "Plugin"
+        std::string file;          // .ptc/.pctp/.pp de origem
         std::function<std::unique_ptr<Pedal>()> make;
-        bool fromPlugin = false;   // true = veio de um plugin .ptc/.lua
+        bool fromPlugin = false;   // true = veio de um plugin .ptc/.pctp/.pp
     };
 
     class AssetLibrary {
@@ -32,8 +34,9 @@ namespace gp {
             add("Reverb", "Time/Space", [] { return std::make_unique<Reverb>(); });
         }
         void add(std::string name, std::string category, std::function<std::unique_ptr<Pedal>()> f,
-            bool fromPlugin = false) {
-            assets_.push_back({ std::move(name), std::move(category), std::move(f), fromPlugin });
+            bool fromPlugin = false, std::string source = "Native", std::string file = {}) {
+            assets_.push_back({ std::move(name), std::move(category), std::move(source),
+                                std::move(file), std::move(f), fromPlugin });
         }
         // remove só os assets vindos de plugins (usado ao reler a pasta Plugins)
         void clearPlugins() {

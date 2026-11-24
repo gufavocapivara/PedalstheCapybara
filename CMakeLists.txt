@@ -100,6 +100,18 @@ endif()
 # ---- OpenGL -----------------------------------------------------------------
 find_package(OpenGL REQUIRED)
 
+# ---- miniz (ZIP: .pctp / .pp) ------------------------------------------------
+set(MINIZ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz")
+if(NOT EXISTS "${MINIZ_DIR}/miniz.c")
+  message(FATAL_ERROR "Missing third_party/miniz (miniz.c, miniz_zip.c, ...)")
+endif()
+add_library(miniz STATIC
+  "${MINIZ_DIR}/miniz.c"
+  "${MINIZ_DIR}/miniz_tdef.c"
+  "${MINIZ_DIR}/miniz_tinfl.c"
+  "${MINIZ_DIR}/miniz_zip.c")
+target_include_directories(miniz PUBLIC "${MINIZ_DIR}")
+
 # ---- ImGui library ----------------------------------------------------------
 add_library(imgui_lib STATIC
   ${IMGUI_DIR}/imgui.cpp
@@ -116,10 +128,13 @@ add_executable(PedalTheCapybara
   src/main.cpp
   src/audio.cpp
   src/textures.cpp
+  src/plugins.cpp
+  src/plugin_package.cpp
   include/audio.h
   include/pedals.h
   include/assets.h
   include/plugins.h
+  include/plugin_package.h
   include/lua_pedal.h
   include/plugin_editor.h
   include/textures.h
@@ -131,17 +146,35 @@ target_include_directories(PedalTheCapybara PRIVATE
   include
   ${STB_DIR})              # <-- permite #include "stb_image.h" em textures.cpp
 
-target_link_libraries(PedalTheCapybara PRIVATE imgui_lib lua_lib)
+target_link_libraries(PedalTheCapybara PRIVATE imgui_lib lua_lib miniz)
 
-# Inclui o modelo JOYO American Sound nas builds limpas do app.
+if(WIN32)
+  # portable-file-dialogs.h (diálogos nativos de abrir/salvar arquivos)
+  target_link_libraries(PedalTheCapybara PRIVATE comdlg32 ole32 uuid shell32)
+endif()
+
+# Copia plugins, packs e assets para a pasta do executável em builds limpas.
 add_custom_command(TARGET PedalTheCapybara POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:PedalTheCapybara>/Plugins"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/Plugins/pedal_american.lua"
-    "$<TARGET_FILE_DIR:PedalTheCapybara>/Plugins/pedal_american.lua"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/Plugins/pedal_american.ptc"
-    "$<TARGET_FILE_DIR:PedalTheCapybara>/Plugins/pedal_american.ptc")
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:PedalTheCapybara>/Packs")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Plugins")
+  add_custom_command(TARGET PedalTheCapybara POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/Plugins"
+      "$<TARGET_FILE_DIR:PedalTheCapybara>/Plugins")
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Packs")
+  add_custom_command(TARGET PedalTheCapybara POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/Packs"
+      "$<TARGET_FILE_DIR:PedalTheCapybara>/Packs")
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Assets")
+  add_custom_command(TARGET PedalTheCapybara POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/Assets"
+      "$<TARGET_FILE_DIR:PedalTheCapybara>/Assets")
+endif()
 target_compile_definitions(PedalTheCapybara PRIVATE NOMINMAX)
 
 if(MSVC)

@@ -1,0 +1,6 @@
+NAME=CN Hiwatt Lead Amp (Inspired)
+DESCRIPTION=Amp inspirado em clean headroom com drive de lead. Controles: Gain, Bass, Mid, Treble, Presence, Master. DSP original, não clone de circuito.
+AUTHOR=Pedals the Capybara
+VERSION=1.0
+SCRIPT=cn_amp.lua
+ICON=assets/face.png
