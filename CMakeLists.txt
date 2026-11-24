@@ -123,13 +123,25 @@ add_library(imgui_lib STATIC
 target_include_directories(imgui_lib PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
+# ---- leitura de pacotes (.pctp/.pp) ----------------------------------------
+add_library(package_lib STATIC src/plugin_package.cpp)
+target_include_directories(package_lib PUBLIC include third_party)
+target_link_libraries(package_lib PUBLIC miniz)
+
 # ---- app --------------------------------------------------------------------
 add_executable(PedalTheCapybara
   src/main.cpp
+  src/ui_theme.cpp
+  src/ui_widgets.cpp
+  src/ui_cards.cpp
+  src/ui_library.cpp
+  src/ui_header.cpp
+  src/ui_system.cpp
+  src/ui_toasts.cpp
   src/audio.cpp
   src/textures.cpp
   src/plugins.cpp
-  src/plugin_package.cpp
+  include/ui_shared.h
   include/audio.h
   include/pedals.h
   include/assets.h
@@ -146,7 +158,7 @@ target_include_directories(PedalTheCapybara PRIVATE
   include
   ${STB_DIR})              # <-- permite #include "stb_image.h" em textures.cpp
 
-target_link_libraries(PedalTheCapybara PRIVATE imgui_lib lua_lib miniz)
+target_link_libraries(PedalTheCapybara PRIVATE imgui_lib lua_lib package_lib)
 
 if(WIN32)
   # portable-file-dialogs.h (diálogos nativos de abrir/salvar arquivos)
@@ -186,3 +198,38 @@ endif()
 if(UNIX AND NOT APPLE)
   target_link_libraries(PedalTheCapybara PRIVATE pthread dl m)
 endif()
+
+# ---- testes de smoke (.pctp / .pp) -----------------------------------------
+enable_testing()
+
+add_executable(smoke_packages tests/smoke_packages.cpp)
+target_include_directories(smoke_packages PRIVATE include third_party)
+target_link_libraries(smoke_packages PRIVATE package_lib)
+if(MSVC)
+  target_compile_options(smoke_packages PRIVATE /utf-8)
+endif()
+
+add_test(NAME packages
+  COMMAND smoke_packages
+    "${CMAKE_CURRENT_SOURCE_DIR}/Demos/GoldenEcho.pctp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Demos/boss_ds1.pctp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Packs/CapybaraStarter.pp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Packs/BossInspired.pp")
+
+# ---- zip distribuivel -------------------------------------------------------
+# `cmake --build build --config Release --target package`
+set(PACKAGE_DIR "${CMAKE_BINARY_DIR}/package")
+set(PACKAGE_ZIP "${CMAKE_BINARY_DIR}/PedalTheCapybara-windows-x64.zip")
+
+add_custom_target(package
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:PedalTheCapybara>" "${PACKAGE_DIR}/"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${PACKAGE_DIR}/"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" "${PACKAGE_DIR}/"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Plugins" "${PACKAGE_DIR}/Plugins"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Packs" "${PACKAGE_DIR}/Packs"
+  COMMAND ${CMAKE_COMMAND} -E chdir "${PACKAGE_DIR}" "${CMAKE_COMMAND}" -E tar cf "${PACKAGE_ZIP}" --format=zip -- .
+  DEPENDS PedalTheCapybara
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+  COMMENT "Gerando ${PACKAGE_ZIP}"
+  VERBATIM)

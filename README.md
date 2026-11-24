@@ -1,6 +1,14 @@
 # Pedals the Capybara
 
+[![build](https://github.com/gufavocapivara/PedalstheCapybara/actions/workflows/build.yml/badge.svg)](https://github.com/gufavocapivara/PedalstheCapybara/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pedals the Capybara é um pedalboard/amp sim em tempo real para guitarra, escrito em C++ com Dear ImGui + GLFW/OpenGL, miniaudio e Lua.
+
+<!-- Demo: grave ~10 s arrastando um pedal para a cadeia e salvando como docs/demo.gif.
+     Depois descomente a linha abaixo:
+![Demonstração](docs/demo.gif)
+-->
 
 ## O que mudou nesta reformulação
 
@@ -49,10 +57,40 @@ AnotherPlugin/
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release --parallel 8
+ctest --test-dir build -C Release --output-on-failure
 .\build\Release\PedalTheCapybara.exe
 ```
 
+Para gerar um zip distribuível (exe + `Plugins/` + `Packs/` + README + LICENSE):
+
+```powershell
+cmake --build build --config Release --target package
+# build/PedalTheCapybara-windows-x64.zip
+```
+
 Dependências são baixadas via FetchContent (GLFW, Dear ImGui, Lua, stb) e bibliotecas vendorizadas em `third_party/` (miniaudio, miniz, portable-file-dialogs).
+
+## Estrutura do código
+
+A interface fica em `src/ui_*.cpp`, com estado e assinaturas compartilhadas em `include/ui_shared.h`:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `src/main.cpp` | inicialização, menu e loop principal |
+| `src/ui_theme.cpp` | estilo, fontes e escala de DPI |
+| `src/ui_widgets.cpp` | knobs, botões, meters e texturas |
+| `src/ui_cards.cpp` | cards da cadeia, drag-and-drop e power button |
+| `src/ui_library.cpp` | linhas da biblioteca de pedais/amps |
+| `src/ui_header.cpp` | cabeçalho, ícones e abertura de URLs/pastas |
+| `src/ui_system.cpp` | integrações com o sistema (Shell/Win32) |
+| `src/ui_toasts.cpp` | notificações e arquivos arrastados |
+| `src/plugin_package.cpp` | leitura de `.pctp`/`.pp` (`package_lib`) |
+
+O teste de smoke `tests/smoke_packages.cpp` abre os packs incluídos e valida manifestos, scripts Lua e assets — sem precisar de OpenGL ou áudio.
+
+## Licença
+
+[MIT](LICENSE). Plugins e packs distribuídos junto não precisam adotar a mesma licença.
 
 ## Packs incluídos
 
