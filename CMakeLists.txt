@@ -26,6 +26,9 @@ option(FETCHCONTENT_UPDATES_DISCONNECTED "Skip updates for already downloaded de
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+# CI Linux e headless: sem Wayland, senao o GLFW 3.4 exige wayland-scanner.
+set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
 set(FETCHCONTENT_QUIET OFF)
 
 # ---- GLFW -------------------------------------------------------------------

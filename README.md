@@ -5,8 +5,10 @@
 
 Pedals the Capybara é um pedalboard/amp sim em tempo real para guitarra, escrito em C++ com Dear ImGui + GLFW/OpenGL, miniaudio e Lua.
 
-<!-- Demo: grave ~10 s arrastando um pedal para a cadeia e salvando como docs/demo.gif.
-     Depois descomente a linha abaixo:
+![Pedals the Capybara](docs/screenshot.png)
+
+<!-- Para uma demonstração animada: grave ~10 s arrastando um pedal para a cadeia,
+     salve como docs/demo.gif e descomente a linha abaixo:
 ![Demonstração](docs/demo.gif)
 -->
 
